@@ -1,0 +1,5 @@
+streamlit
+yfinance
+prophet
+plotly
+statsmodels
