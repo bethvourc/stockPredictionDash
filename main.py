@@ -6,6 +6,8 @@ import plotly.graph_objs as go
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import pandas as pd
 import numpy as np
+import requests
+from io import StringIO
 
 # Date time frame for data
 START = "2015-01-01" 
@@ -13,8 +15,41 @@ TODAY = date.today().strftime("%Y-%m-%d")
 
 st.title("Stock Prediction App")
 
-stocks = ("AAPL", "GOOG", "MSFT", "GME")
-selected_stocks = st.selectbox("Select dataset for prediction ", stocks)
+# Function to get S&P 500 stocks
+@st.cache_data
+def load_sp500_stocks():
+    # Get S&P 500 stocks from Wikipedia
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    table = pd.read_html(url)[0]
+    return list(zip(table['Symbol'].tolist(), table['Security'].tolist()))
+
+# Load S&P 500 stocks
+sp500_stocks = load_sp500_stocks()
+stock_dict = dict(sp500_stocks)
+
+# Create a search box for stocks
+search_text = st.text_input("Search for a stock (by symbol or company name):", "")
+
+# Filter stocks based on search
+if search_text:
+    filtered_stocks = [
+        (symbol, name) for symbol, name in sp500_stocks 
+        if search_text.upper() in symbol.upper() or search_text.lower() in name.lower()
+    ]
+else:
+    filtered_stocks = sp500_stocks
+
+# Create formatted options for selectbox
+stock_options = [f"{symbol} - {name}" for symbol, name in filtered_stocks]
+
+# Default to first stock if available, otherwise show message
+if stock_options:
+    selected_stock_full = st.selectbox("Select dataset for prediction", stock_options)
+    selected_stocks = selected_stock_full.split(" - ")[0]  # Extract symbol from selection
+else:
+    st.warning("No stocks match your search criteria")
+    st.stop()
+
 n_years = st.slider("Years of prediction:", 1, 4)
 period = n_years * 365
 
@@ -29,7 +64,8 @@ data = load_data(selected_stocks)
 time.sleep(1)
 data_load_state.text("Loading data...done!")
 
-st.subheader('Raw data')
+# Display company name along with the stock symbol
+st.subheader(f'Data for {selected_stocks} - {stock_dict[selected_stocks]}')
 st.write(data.tail())
 
 def plot_raw_data():
@@ -78,7 +114,7 @@ fig1.add_trace(go.Scatter(x=forecast_df['Date'], y=forecast_df['Predicted_Close'
 fig1.layout.update(title_text="Forecast", xaxis_rangeslider_visible=True)
 st.plotly_chart(fig1)
 
-# Plot components - using the correct attributes
+# Plot components
 st.write('Forecast components')
 
 # Get the components using the correct method
