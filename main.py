@@ -1,5 +1,5 @@
 import streamlit as st
-from datetime import date
+from datetime import date, datetime, timedelta
 import time
 import yfinance as yf
 import plotly.graph_objs as go
@@ -18,10 +18,13 @@ st.title("Stock Prediction App")
 # Function to get S&P 500 stocks
 @st.cache_data
 def load_sp500_stocks():
-    # Get S&P 500 stocks from Wikipedia
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
-    return list(zip(table['Symbol'].tolist(), table['Security'].tolist()))
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        table = pd.read_html(url)[0]
+        return list(zip(table['Symbol'].tolist(), table['Security'].tolist()))
+    except Exception as e:
+        st.error(f"Error loading S&P 500 stocks: {str(e)}")
+        return []
 
 # Load S&P 500 stocks
 sp500_stocks = load_sp500_stocks()
@@ -51,18 +54,30 @@ else:
     st.stop()
 
 n_years = st.slider("Years of prediction:", 1, 4)
-period = n_years * 365
+period = n_years * 252  # Using trading days instead of calendar days
 
-@st.cache_data
+@st.cache_data(ttl=timedelta(hours=6))
 def load_data(ticker):
-    data = yf.download(ticker, START, TODAY)
-    data.reset_index(inplace=True)
-    return data
+    try:
+        data = yf.download(ticker, START, TODAY)
+        if data.empty:
+            return None
+        data.reset_index(inplace=True)
+        # Convert Date column to datetime if it's not already
+        data['Date'] = pd.to_datetime(data['Date'])
+        return data
+    except Exception as e:
+        st.error(f"Error loading data for {ticker}: {str(e)}")
+        return None
 
-data_load_state = st.text("Load data...")
+data_load_state = st.text("Loading data...")
 data = load_data(selected_stocks)
-time.sleep(1)
-data_load_state.text("Loading data...done!")
+
+if data is None or data.empty:
+    st.error(f"No data available for {selected_stocks}")
+    st.stop()
+
+data_load_state.text("Loading data... done!")
 
 # Display company name along with the stock symbol
 st.subheader(f'Data for {selected_stocks} - {stock_dict[selected_stocks]}')
@@ -72,62 +87,115 @@ def plot_raw_data():
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=data['Date'], y=data['Open'], name='stock_open'))
     fig.add_trace(go.Scatter(x=data['Date'], y=data['Close'], name='stock_close'))
-    fig.layout.update(title_text="Time Series Data", xaxis_rangeslider_visible=True)
+    fig.layout.update(
+        title_text="Time Series Data", 
+        xaxis_rangeslider_visible=True,
+        xaxis_title="Date",
+        yaxis_title="Price"
+    )
     st.plotly_chart(fig)
 
 plot_raw_data()
 
 # Forecasting with Exponential Smoothing
 df_train = data[['Date', 'Close']].copy()
+df_train = df_train.set_index('Date')
 
-# Fit the model
-model = ExponentialSmoothing(
-    df_train['Close'],
-    seasonal_periods=30,
-    trend='add',
-    seasonal='add',
-)
-fitted_model = model.fit()
+try:
+    # Fit the model with improved parameters
+    model = ExponentialSmoothing(
+        df_train['Close'],
+        seasonal_periods=252,  # Trading days in a year
+        trend='add',
+        seasonal='add',
+        initialization_method='estimated',
+        use_boxcox=True
+    )
+    
+    fitted_model = model.fit(optimized=True, remove_bias=True)
 
-# Create future dates
-last_date = df_train['Date'].max()
-future_dates = pd.date_range(
-    start=last_date,
-    periods=period,
-    freq='D'
-)
+    # Create future dates (trading days only)
+    last_date = df_train.index[-1]
+    future_dates = pd.date_range(
+        start=last_date + timedelta(days=1),
+        periods=period,
+        freq='B'  # Business days
+    )
 
-# Make prediction
-forecast = fitted_model.forecast(period)
-forecast_df = pd.DataFrame({
-    'Date': future_dates,
-    'Predicted_Close': forecast
-})
+    # Make prediction
+    forecast = fitted_model.forecast(period)
+    forecast_df = pd.DataFrame({
+        'Date': future_dates,
+        'Predicted_Close': forecast
+    })
 
-# Plot the forecast
-st.subheader('Forecast data')
-st.write(forecast_df.tail())
+    # Plot the forecast
+    st.subheader('Forecast data')
+    st.write(forecast_df.tail())
 
-fig1 = go.Figure()
-fig1.add_trace(go.Scatter(x=data['Date'], y=data['Close'], name='Historical'))
-fig1.add_trace(go.Scatter(x=forecast_df['Date'], y=forecast_df['Predicted_Close'], name='Forecast'))
-fig1.layout.update(title_text="Forecast", xaxis_rangeslider_visible=True)
-st.plotly_chart(fig1)
+    fig1 = go.Figure()
+    
+    # Historical data
+    fig1.add_trace(go.Scatter(
+        x=data['Date'],
+        y=data['Close'],
+        name='Historical',
+        line=dict(color='blue')
+    ))
+    
+    # Forecast
+    fig1.add_trace(go.Scatter(
+        x=forecast_df['Date'],
+        y=forecast_df['Predicted_Close'],
+        name='Forecast',
+        line=dict(color='red', dash='dash')
+    ))
 
-# Plot components
-st.write('Forecast components')
+    fig1.layout.update(
+        title_text="Stock Price Forecast",
+        xaxis_title="Date",
+        yaxis_title="Price",
+        xaxis_rangeslider_visible=True,
+        showlegend=True
+    )
+    st.plotly_chart(fig1)
 
-# Get the components using the correct method
-result = pd.DataFrame(index=data.index)
-result['Observed'] = df_train['Close']
-result['Trend'] = fitted_model.level
-result['Season'] = fitted_model.season
-result['Residual'] = fitted_model.resid
+    # Plot components
+    st.subheader('Forecast Components')
 
-# Create the components plot
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=data['Date'], y=result['Trend'], name='Trend'))
-fig2.add_trace(go.Scatter(x=data['Date'], y=result['Season'], name='Seasonal'))
-fig2.add_trace(go.Scatter(x=data['Date'], y=result['Residual'], name='Residual'))
-fig2.layout.update(title_text="Forecast Components", xaxis_rangeslider_visible=True)
-st.plotly_chart(fig2)
+    # Get the components
+    result = pd.DataFrame(index=data['Date'])
+    result['Observed'] = df_train['Close']
+    result['Trend'] = fitted_model.level
+    result['Season'] = fitted_model.season[:len(data.index)]
+    result['Residual'] = result['Observed'] - (result['Trend'] + result['Season'])
+
+    # Create the components plot
+    fig2 = go.Figure()
+    
+    components = {
+        'Trend': 'blue',
+        'Season': 'green',
+        'Residual': 'red'
+    }
+    
+    for component, color in components.items():
+        fig2.add_trace(go.Scatter(
+            x=data['Date'],
+            y=result[component],
+            name=component,
+            line=dict(color=color)
+        ))
+
+    fig2.layout.update(
+        title_text="Forecast Components Analysis",
+        xaxis_title="Date",
+        yaxis_title="Value",
+        xaxis_rangeslider_visible=True,
+        showlegend=True
+    )
+    st.plotly_chart(fig2)
+
+except Exception as e:
+    st.error(f"An error occurred during forecasting: {str(e)}")
+    st.write("Please try adjusting the parameters or selecting a different stock.")
